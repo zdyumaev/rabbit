@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -63,5 +64,25 @@ func TestHandler(t *testing.T) {
 	handler(rab).ServeHTTP(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Ошибка некорректных входных данных. Код: %v", w.Code)
+	}
+}
+
+func Test_handler(t *testing.T) {
+	type args struct {
+		rab sender
+	}
+	tests := []struct {
+		name string
+		args args
+		want http.HandlerFunc
+	}{
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := handler(tt.args.rab); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("handler() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

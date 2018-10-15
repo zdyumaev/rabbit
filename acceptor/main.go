@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+
+	"../rabbit"
 )
 
 var (
@@ -24,12 +26,14 @@ type profile struct {
 func main() {
 	flag.Parse()
 
-	rab := newRabbit(*rabbitURI, *queueName)
-	defer rab.close()
+	rabbit := rabbit.NewRabbit(*rabbitURI, *queueName, nil)
+	defer rabbit.Close()
+
+	go rabbit.Maintain()
 
 	listenString := *address + ":" + *port
 	log.Print("Запуск сервера: ", listenString)
-	http.HandleFunc("/put", handler(rab))
+	http.HandleFunc("/put", handler(rabbit))
 	err := http.ListenAndServe(listenString, nil)
 
 	if err != nil {
@@ -38,7 +42,7 @@ func main() {
 }
 
 // handler обрабатывает входящие запросы
-func handler(rab rabbitService) http.HandlerFunc {
+func handler(rabbit rabbit.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			log.Printf("Попытка запроса методом %v", r.Method)
@@ -59,7 +63,7 @@ func handler(rab rabbitService) http.HandlerFunc {
 			http.Error(w, "Ошибка в запросе", http.StatusBadRequest)
 			return
 		}
-		err = rab.send(data)
+		err = rabbit.Send(data)
 		if err != nil {
 			log.Printf("Ошибка публикации сообщения: %v", err)
 			http.Error(w, "Сервис недоступен", http.StatusServiceUnavailable)

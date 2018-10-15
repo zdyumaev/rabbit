@@ -3,15 +3,13 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-)
 
-const query = `INSERT INTO profile (name, url) VALUES
-					 ($1, $2)`
+	"../rabbit"
+)
 
 var (
 	rabbitURI   = flag.String("rabbitURI", "amqp://guest:guest@localhost:5672/", "rabbitMQ URI")
@@ -25,29 +23,6 @@ type profile struct {
 	URL  string
 }
 
-// handleFunc объявляет тип обработчика приходящих сообщений
-type handleFunc func([]byte) error
-
-// deliveryHandler добавляет приходящие данные в БД
-func deliveryHandler(db *sqlx.DB) handleFunc {
-	return func(data []byte) error {
-		p := &profile{}
-		// Дополнительная проверка на корректность
-		err := json.Unmarshal(data, p)
-		if err != nil {
-			log.Printf("Ошибка разбора сообщения: %v", err)
-			return nil // Чтобы отбросить, так как возвращать в очередь некорректные данные бесполезно
-		}
-		_, err = db.Exec(query, p.Name, p.URL)
-
-		all := make([]profile, 0)                        /////////////////////////
-		db.Select(&all, "SELECT name, url FROM profile") /// добавлено для демонстрации работы БД
-		fmt.Printf("%v\n", all)                          ///////////////////////////
-
-		return err
-	}
-}
-
 func main() {
 	flag.Parse()
 
@@ -56,9 +31,26 @@ func main() {
 		log.Printf("Ошибка соединения с базой данных: %v", err)
 	}
 
-	rab := newRabbit(*rabbitURI, *queueName, deliveryHandler(db))
-	defer rab.close()
+	rabbit := rabbit.NewRabbit(*rabbitURI, *queueName, profileHandler(db))
+	defer rabbit.Close()
 
-	forever := make(chan bool)
-	<-forever
+	rabbit.Maintain()
+}
+
+const query = `INSERT INTO profile (name, url) VALUES
+					 ($1, $2)`
+
+// profileHandler добавляет приходящие данные в БД
+func profileHandler(db *sqlx.DB) rabbit.HandleFunc {
+	return func(data []byte) error {
+		p := &profile{}
+		// Дополнительная проверка на корректность
+		err := json.Unmarshal(data, p)
+		if err != nil {
+			log.Printf("Ошибка разбора сообщения: %v. Данные: %v", err, string(data))
+			return nil // Чтобы отбросить, так как возвращать в очередь некорректные данные бесполезно
+		}
+		_, err = db.Exec(query, p.Name, p.URL)
+		return err
+	}
 }
