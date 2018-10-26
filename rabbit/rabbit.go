@@ -1,53 +1,56 @@
+// Package rabbit - это обёртка над библиотекой AMQP для создания типа
+// очереди rabbitMQ, которая позволяет принимать и отправлять сообщения,
+// и восстанавливать соединение в случае ошибок.
+// Имеет ограничения по настройке параметров очереди и обмена.
+// Практично в рамках конкретной задачи, но слабо расширяемо.
 package rabbit
 
 import (
 	"errors"
 	"log"
-	"time"
 
 	"github.com/streadway/amqp"
 )
 
-// Sender предоставляет интерфейс отправки данных
-type Sender interface {
-	Send([]byte) error
+// Publisher предоставляет интерфейс отправки данных
+type Publisher interface {
+	Publish([]byte) error
 }
 
 // HandleFunc объявляет тип обработчика приходящих сообщений
 type HandleFunc func([]byte) error
 
-// Rabbit содержит все переменные для работы с rabbitMQ
-type Rabbit struct {
-	conn      *amqp.Connection
-	channel   *amqp.Channel
-	queue     *amqp.Queue
-	errChan   chan *amqp.Error
-	isClosed  bool
-	uri       string
-	queueName string
-	handler   HandleFunc
-	isOK      bool
+// Queue содержит все переменные для работы с rabbitMQ
+type Queue struct {
+	conn     *amqp.Connection
+	channel  *amqp.Channel
+	queue    *amqp.Queue
+	errChan  chan *amqp.Error
+	isClosed bool
+	uri      string
+	name     string
+	handler  HandleFunc
+	isOK     bool
 }
 
-// NewRabbit возвращает инициализированное соединение с rabbitMQ.
+// NewQueue возвращает инициализированное соединение с rabbitMQ.
 // Блокирует рутину до удачной инициализации.
-// Если обработчик f задан, то инициализируется подписка на очередь,
-// если нет, то подписка не осуществляется.
-func NewRabbit(uri, queueName string, f HandleFunc) *Rabbit {
-	r := &Rabbit{
-		uri:       uri,
-		queueName: queueName,
-		handler:   f}
+// Если обработчик f задан, то инициализируется подписка на очередь, иначе подписка не осуществляется.
+func NewQueue(uri, queueName string, f HandleFunc) *Queue {
+	r := &Queue{
+		uri:     uri,
+		name:    queueName,
+		handler: f}
 	r.init()
 	return r
 }
 
-// Send публикует сообщение, если соединение готово
-func (r *Rabbit) Send(data []byte) error {
-	if r.isOK {
-		err := r.channel.Publish(
+// Publish публикует сообщение, если соединение готово
+func (q *Queue) Publish(data []byte) error {
+	if q.isOK {
+		err := q.channel.Publish(
 			"",
-			r.queueName,
+			q.name,
 			false,
 			false,
 			amqp.Publishing{
@@ -55,104 +58,106 @@ func (r *Rabbit) Send(data []byte) error {
 				Body:         data})
 		return err
 	}
-	return errors.New("rabbit not ready")
+	return errors.New("queue not ready")
 }
 
 // Maintain пытается восстановить связь в случае закрытия соединения
-func (r *Rabbit) Maintain() {
+func (q *Queue) Maintain() {
 	for {
-		err := <-r.errChan
+		err := <-q.errChan
 		log.Printf("Соединение с rabbitMQ закрыто: %v", err)
-		r.isOK = false
-		if !r.isClosed {
-			r.init()
+		q.isOK = false
+		if !q.isClosed {
+			q.init()
 		}
 	}
 }
 
 // Close освобождает ресурсы
-func (r *Rabbit) Close() {
-	r.isClosed = true
-	if r.channel != nil {
-		r.channel.Close()
+func (q *Queue) Close() {
+	q.isClosed = true
+	if q.channel != nil {
+		q.channel.Close()
 	}
-	if r.conn != nil {
-		r.conn.Close()
+	if q.conn != nil {
+		q.conn.Close()
 	}
 }
 
 // handle получает сообщения из очереди и вызывает обработчик, указанный при создании.
 // Запускается отдельной рутиной.
-func (r *Rabbit) handle(deliveries <-chan amqp.Delivery) {
-	for d := range deliveries {
-		data := d.Body
-		err := r.handler(data)
+func (q *Queue) handle(deliveries <-chan amqp.Delivery) {
+	for delivery := range deliveries {
+		data := delivery.Body
+		err := q.handler(data)
 		if err != nil {
-			d.Nack(false, true)
+			delivery.Nack(false, true)
 		} else {
-			d.Ack(false)
+			delivery.Ack(false)
 		}
 	}
 }
 
-// init подготавливает все поля структуры до полной готовности к приёму. Начинается заново при любой ошибке.
-func (r *Rabbit) init() {
+// init подготавливает все поля структуры до полной готовности к приёму. Начинается заново при ошибке на любой стадии.
+func (q *Queue) init() {
 	for {
-		conn, err := amqp.Dial(r.uri)
-		if err == nil {
-			channel, err := conn.Channel()
-			if err == nil {
-				queue, err := channel.QueueDeclare(
-					r.queueName,
-					true, // durable
-					false,
-					false,
-					false,
-					nil)
-				if err == nil {
-					if r.handler != nil {
-						messages, err := channel.Consume(
-							r.queueName,
-							"",
-							false, // auto-ack
-							false,
-							false,
-							false,
-							nil)
-						if err == nil {
-							r.initFields(conn, channel, &queue)
-							go r.handle(messages) // Установка обработчика приходящих сообщений
-							return
-						}
-					} else {
-						r.initFields(conn, channel, &queue)
-						return
-					}
-					log.Printf("Ошибка регистрации потребителя: %v", err)
-					// Сбрасываем всё, чтобы далее повторить с начала при любой ошибке
-
-				} else {
-					log.Printf("Ошибка объявления очереди: %v", err)
-				}
-				channel.Close()
-			} else {
-				log.Printf("Ошибка создания канала rabbitMQ: %v", err)
-			}
-			conn.Close()
-		} else {
+		conn, err := amqp.Dial(q.uri)
+		if err != nil {
 			log.Printf("Ошибка подключения к rabbitMQ: %v", err)
+			continue
 		}
-		time.Sleep(5 * time.Second)
+		channel, err := conn.Channel()
+		if err != nil {
+			log.Printf("Ошибка создания канала rabbitMQ: %v", err)
+			conn.Close()
+			continue
+		}
+		queue, err := channel.QueueDeclare(
+			q.name,
+			true, // durable
+			false,
+			false,
+			false,
+			nil)
+		if err != nil {
+			log.Printf("Ошибка объявления очереди: %v", err)
+			channel.Close()
+			conn.Close()
+			continue
+		}
+		// Если обработчик не установлен, то инициализация закончена
+		if q.handler == nil {
+			q.setFields(conn, channel, &queue)
+			return
+		}
+		// Иначе - подписываемся
+		messages, err := channel.Consume(
+			q.name,
+			"",
+			false, // auto-ack
+			false,
+			false,
+			false,
+			nil)
+		if err != nil {
+			log.Printf("Ошибка регистрации потребителя: %v", err)
+			channel.Close()
+			conn.Close()
+			continue
+		}
+		q.setFields(conn, channel, &queue)
+		go q.handle(messages) // Установка обработчика приходящих сообщений
+		return
 	}
 }
 
 // initFields заполняет поля структуры после успешной инициализации и создаёт канал уведомлений о закрытии соединения
-func (r *Rabbit) initFields(conn *amqp.Connection, channel *amqp.Channel, queue *amqp.Queue) {
-	r.conn = conn
-	r.channel = channel
-	r.queue = queue
-	r.errChan = make(chan *amqp.Error)
-	r.conn.NotifyClose(r.errChan)
-	r.isOK = true
+func (q *Queue) setFields(conn *amqp.Connection, channel *amqp.Channel, queue *amqp.Queue) {
+	q.conn = conn
+	q.channel = channel
+	q.queue = queue
+	q.errChan = make(chan *amqp.Error)
+	q.conn.NotifyClose(q.errChan)
+	q.isOK = true
 	log.Print("Соединение с rabbitMQ установлено")
 }

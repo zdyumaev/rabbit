@@ -31,10 +31,10 @@ func main() {
 		log.Printf("Ошибка соединения с базой данных: %v", err)
 	}
 
-	rabbit := rabbit.NewRabbit(*rabbitURI, *queueName, profileHandler(db))
-	defer rabbit.Close()
+	queue := rabbit.NewQueue(*rabbitURI, *queueName, profileHandler(db))
+	defer queue.Close()
 
-	rabbit.Maintain()
+	queue.Maintain()
 }
 
 const query = `INSERT INTO profile (name, url) VALUES

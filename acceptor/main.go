@@ -26,23 +26,21 @@ type profile struct {
 func main() {
 	flag.Parse()
 
-	rabbit := rabbit.NewRabbit(*rabbitURI, *queueName, nil)
-	defer rabbit.Close()
+	queue := rabbit.NewQueue(*rabbitURI, *queueName, nil)
+	defer queue.Close()
 
-	go rabbit.Maintain()
+	go queue.Maintain()
 
 	listenString := *address + ":" + *port
 	log.Print("Запуск сервера: ", listenString)
-	http.HandleFunc("/put", handler(rabbit))
+	http.HandleFunc("/put", handler(queue))
 	err := http.ListenAndServe(listenString, nil)
 
-	if err != nil {
-		log.Printf("Ошибка веб-сервера: %v", err)
-	}
+	log.Printf("Ошибка веб-сервера: %v", err)
 }
 
 // handler обрабатывает входящие запросы
-func handler(rabbit rabbit.Sender) http.HandlerFunc {
+func handler(queue rabbit.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			log.Printf("Попытка запроса методом %v", r.Method)
@@ -63,7 +61,7 @@ func handler(rabbit rabbit.Sender) http.HandlerFunc {
 			http.Error(w, "Ошибка в запросе", http.StatusBadRequest)
 			return
 		}
-		err = rabbit.Send(data)
+		err = queue.Publish(data)
 		if err != nil {
 			log.Printf("Ошибка публикации сообщения: %v", err)
 			http.Error(w, "Сервис недоступен", http.StatusServiceUnavailable)
